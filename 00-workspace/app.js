@@ -30,10 +30,25 @@ var app = {
   mapzenKey: 'mapzen-CpAANqF', 
   activeSearch: 'from',
   options: [],
+  longpress: false,
   selection: {
     from: {},
     to: {}
   },
+  routeLayer: new ol.layer.Vector({
+    map: map,
+    opacity: 0.6,
+    visible: true,
+    style: new ol.style.Style({
+      stroke: new ol.style.Stroke({
+        color: '#2196F3',
+        width: 5
+      })
+    }),
+    source: new ol.source.Vector({
+      features: []
+    })
+  }),
 
   typeAhead: function(e){
     var el = e.target;
@@ -88,15 +103,17 @@ var app = {
     $(elId).val(feature.properties.label);
     app.clearList();
     if(app.selection.from.hasOwnProperty('geometry') && app.selection.to.hasOwnProperty('geometry')){
-      app.queryMobility(function(err, data){
-        console.log(err, data)
-      });
+      app.queryMobility(app.displayRoute);
     }
   },
 
   clearList: function(e){
     app.options = [];
+    app.trip = {};
     app.renderResultsList();
+    app.renderDirectionsList();
+    app.routeLayer.setSource(null);
+    map.removeOverlay(app.detailOverlay);
   },
 
   clearSearch: function(e){
@@ -127,13 +144,133 @@ var app = {
     $.ajax({
       url: 'https://valhalla.mapzen.com/route?json=' + JSON.stringify(json) + '&api_key=' + app.mapzenKey,
       success: function(data, status, req){
-        callback(null, data);
+        app.trip = data.trip;
+        var coords = polyline.decode(data.trip.legs[0].shape);
+        callback(null, coords);
       },
       error: function(req, status, err){
         callback(err);
       }
     })
-  }
+  },
+
+  displayRoute: function(err, coords){
+    if(err){
+      console.log(err);
+    }else{
+      app.coords = coords;
+
+      var route = {
+        type: 'Feature',
+        geometry: {
+          type: 'LineString',
+          coordinates: coords
+        }
+      }
+
+      app.routeLayer.setSource( new ol.source.Vector({
+        features: (new ol.format.GeoJSON({featureProjection: mapProjection})).readFeatures(route)
+      }))
+
+      map.getView().fit(
+        app.routeLayer.getSource().getExtent(),
+        map.getSize()
+      )      
+
+      app.renderDirectionsList();
+    }
+  },
+
+  renderDirectionsList: function(err){
+    var sidebar = $('#sidebar');
+    var directionsList = $('#directions-list');
+
+    var summarySpan = $('#summary');
+    summarySpan.empty();
+
+    directionsList.empty();
+    if(app.trip && app.trip.legs){
+      map.addOverlay(app.detailOverlay);
+      app.renderOverlay(app.coords[0], 'icon-maneuver-01');
+      var directions = app.trip.legs[0].maneuvers.map(function(man){
+        var li = $('<li class="directions-list-item"></li>');
+        var instructionContainer = $('<div class="directions-list-instruction-container"></div>');
+        var instruction = $('<div class="directions-list-item-direction">' + man.instruction + '</div>');
+        var iconContainer = $('<div class="directions-list-icon-container"></div>')
+        var icon = app.getIconEl('icon-maneuver-' + leftPad(man.type, 2, '0'));
+        iconContainer.append(icon);
+        instructionContainer.append(instruction);
+        if(man.hasOwnProperty('verbal_post_transition_instruction')){
+          var then = $('<div class="directions-then">Then ' + man.verbal_post_transition_instruction + '</div>')
+          instructionContainer.append(then)
+        }
+        li.append(iconContainer);
+        li.append(instructionContainer);
+        li.on('mouseover', function(){
+          app.renderOverlay(app.coords[man.begin_shape_index], 'icon-maneuver-' + leftPad(man.type, 2, '0'));
+        })
+        li.on('click', function(){
+          app.zoomTo(app.coords[man.begin_shape_index]);
+        })
+        return li;
+      })
+      directionsList.append(directions);
+      directionsList.removeClass('hidden');
+
+      var distance = app.trip.summary.length + ' miles';
+      var time = formatDuration(app.trip.summary.time);
+      summarySpan.text(distance + ' - ' + time);
+      summarySpan.removeClass('hidden');
+
+      sidebar.addClass('sidebar-expanded');
+    }else{
+      directionsList.addClass('hidden');
+      summarySpan.addClass('hidden');
+      sidebar.removeClass('sidebar-expanded');
+    }
+  },
+
+  getIconEl: function(id){
+    var svgContainerEl = document.getElementById('svg');
+    var svg = svgContainerEl.querySelectorAll('symbol');
+    var svgEl = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svgEl.setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns', 'http://www.w3.org/1999/svg');
+    svgEl.setAttributeNS('http://www.w3.org/2000/xmlns/', 'xmlns:xlink', 'http://www.w3.org/1999/xlink');
+    var useEl = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    useEl.setAttributeNS('http://www.w3.org/1999/xlink', 'href', '#' + id);
+    svgEl.appendChild(useEl);
+    svgEl.classList.add('directions-list-icon');
+    return svgEl;
+  },
+
+  detailOverlay: new ol.Overlay({
+    positioning: 'center-center',
+    element: document.getElementById('marker'),
+    stopEvent: false
+  }),
+
+  renderOverlay: function(coord, maneuverType){
+    $('#marker').empty().append(app.getIconEl(maneuverType));
+    app.detailOverlay.setPosition(ol.proj.fromLonLat(coord));
+  },
+
+  zoomTo: function(coord){
+    var view = map.getView();
+    view.setCenter(ol.proj.fromLonLat(coord));
+    view.setResolution(50);
+  },
+
+  queryReverse: throttle(function(coords, callback){
+    $.ajax({
+      url: 'https://search.mapzen.com/v1/reverse?point.lat=' + coords[1] + '&point.lon=' + coords[0] + '&api_key=' + app.mapzenKey, 
+      success: function(data, status, req){
+        callback(null, data);
+      },
+      error: function(req, status, err){
+        callback(err)
+      }
+    })
+  }, 100)
 
 }
 
@@ -146,3 +283,28 @@ $('#search-from-input').on('focus', function(){app.activeSearch = 'from'});
 $('#search-to-input').on('keyup', {input:'to'}, app.typeAhead);
 $('#search-to-input').on('focus', function(){app.activeSearch = 'to'});
 $('#clear-to-search').on('click', {input:'to'}, app.clearSearch);
+
+$('#map').on('mousedown', function(){
+  app.longpress = false;
+  pressTimer = window.setTimeout(function(){
+    app.longpress = true;
+  },300);
+});
+
+$('#map').on('mouseup', function(){
+  clearTimeout(pressTimer);
+});
+
+map.on('singleclick', function(e){
+  if(app.longpress){
+    var coords = e.coordinate;
+    var geoCoords = ol.proj.toLonLat(coords);
+    $('#search-' + app.activeSearch + '-input').val(geoCoords.toString());
+    app.queryReverse(geoCoords, function(err, data){
+      if(err) return console.log(err);
+      if(data.features) app.options = data.features;
+      app.renderResultsList();
+    });
+  }
+  app.longpress = false;
+});
