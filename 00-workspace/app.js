@@ -23,3 +23,9 @@ var map = new ol.Map({
     zoom: 5
   })
 });
+
+var app = {
+  mapzenKey: 'mapzen-CpAANqF',
+  activeSearch: 'from'
+
+}
